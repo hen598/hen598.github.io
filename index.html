@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>NEON DASH: OMEGA AUDIO</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; background: #020005; overflow: hidden; touch-action: none; font-family: 'Orbitron', sans-serif; color: #fff; }
+        canvas { display: block; filter: saturate(1.4) contrast(1.2) brightness(1.1); }
+        #ui { position: absolute; top: 20px; width: 100%; text-align: center; pointer-events: none; z-index: 10; }
+        #score { font-size: 3.5rem; font-weight: 900; text-shadow: 0 0 20px #0ff; transition: color 0.3s; }
+        #bestLabel { font-size: 1rem; color: #0ff; opacity: 0.8; margin-top: -5px; }
+        
+        #overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(5px); transition: opacity 0.3s; }
+        .hint { letter-spacing: 3px; color: #f06; margin-top: 10px; font-weight: bold; font-size: 0.9rem; }
+        .stats { margin: 20px 0; font-size: 1.2rem; color: #fff; text-align: center; line-height: 1.6; }
+        .new-best { color: #ff0 !important; text-shadow: 0 0 20px #ff0 !important; }
+        
+        /* Start Button */
+        #startBtn { color:#fff; border: 2px solid #fff; padding: 15px 40px; margin-top: 20px; font-family: 'Orbitron'; font-size: 1.5rem; font-weight: 900; background: transparent; cursor: pointer; transition: all 0.2s; }
+        #startBtn:hover { background: #fff; color: #000; box-shadow: 0 0 20px #fff; }
+    </style>
+</head>
+<body onmousedown="handleInput(true)" onmouseup="handleInput(false)" ontouchstart="handleInput(true)" ontouchend="handleInput(false)">
+    <div id="ui">
+        <div id="score">0</div>
+        <div id="bestLabel">BEST: <span id="bestVal">0</span></div>
+    </div>
+    
+    <div id="overlay">
+        <h1 id="statusTitle" style="font-size: 3.5rem; margin: 0; color: #0ff; text-shadow: 0 0 30px #0ff;">NEON DASH</h1>
+        <div class="stats" id="endStats"></div>
+
+        <!-- MUSIC STATUS -->
+        <div style="margin-top: 10px; font-size: 0.8rem; color: #888;">
+            MUSIC: <span style="color:#0ff">music.mp3</span>
+        </div>
+
+        <button id="startBtn" onclick="initEngine()">CLICK TO START</button>
+        <p class="hint">SPEED UP EVERY 500 PTS</p>
+    </div>
+    
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- HARDCODED AUDIO PLAYER (Hidden) -->
+    <!-- Ensure you have a file named 'music.mp3' in the same folder -->
+    <audio id="bgm" src="music.mp3" loop></audio>
+
+<script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const overlay = document.getElementById("overlay");
+    const scoreEl = document.getElementById("score");
+    const bestEl = document.getElementById("bestVal");
+    const bgm = document.getElementById("bgm");
+    
+    function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+    window.onresize = resize; resize();
+
+    const GROUND_Y = canvas.height - 150;
+    const MID_Y = canvas.height / 2;
+
+    let highScore = localStorage.getItem("neonDashBest") || 0;
+    bestEl.innerText = highScore;
+
+    let state = { isLive: false, dist: 0, speed: 11, hue: 190, pulse: 0, inDragon: false, newBestReached: false };
+    let input = { active: false, jumpPressed: false }; 
+    let player = { 
+        x: 180, y: GROUND_Y-50, w: 45, h: 45, dy: 0, rot: 0, 
+        grounded: false, onRamp: false, coyoteTime: 0, trail: [] 
+    };
+    let obstacles = [];
+    let stars = [];
+    let lastChunkX = 800;
+
+    // --- INPUT HANDLING ---
+    function handleInput(down) { 
+        input.active = down; 
+        if(down) {
+            input.jumpPressed = true;
+        }
+    }
+
+    window.addEventListener('keydown', e => {
+        if(["Space", "ArrowUp", "KeyW"].includes(e.code)) {
+            input.active = true; input.jumpPressed = true;
+            if(!state.isLive && overlay.style.display !== 'none') initEngine();
+        }
+    });
+    window.addEventListener('keyup', e => { if(["Space", "ArrowUp", "KeyW"].includes(e.code)) input.active = false; });
+
+    function pollGamepad() {
+        const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+        if (pads[0]) {
+            const btnPressed = pads[0].buttons[0].pressed; 
+            if (btnPressed && !input.active) {
+                input.jumpPressed = true;
+                if(!state.isLive && overlay.style.display !== 'none') initEngine();
+            }
+            input.active = btnPressed;
+        }
+    }
+
+    for(let i=0; i<80; i++) stars.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, s: Math.random() * 1.5 + 0.5 });
+
+    function spawnChunk() {
+        const cubeChunks = [
+            [{t:'s', x:0, y: GROUND_Y-50}, {t:'s', x:300, y: GROUND_Y-50}], 
+            [{t:'ramp', x:0, y: GROUND_Y}, {t:'s', x:450, y: GROUND_Y-50}], 
+            [{t:'ramp', x:0, y: GROUND_Y}, {t:'ramp', x:300, y: GROUND_Y-140}],
+            [{t:'dragon', x:200, y: GROUND_Y-120}]
+        ];
+        const flyChunks = [
+            [{t:'saw', x:0, y: MID_Y-120}, {t:'saw', x:200, y: MID_Y+80}],
+            [{t:'saw', x:0, y: MID_Y-150}, {t:'saw', x:0, y: MID_Y+150}],
+            [{t:'p', x:250, y: MID_Y}] 
+        ];
+        const pool = state.inDragon ? flyChunks : cubeChunks;
+        const chunk = pool[Math.floor(Math.random() * pool.length)];
+        chunk.forEach(obj => {
+            let w = obj.t === 'ramp' ? 120 : (obj.t === 'dragon' || obj.t === 'p' ? 40 : 50); 
+            let h = obj.t === 'ramp' ? 80 : 50;
+            obstacles.push({ ...obj, x: lastChunkX + obj.x, w: w, h: h, active: true });
+        });
+        lastChunkX += 600;
+    }
+
+    function initEngine() {
+        if (state.isLive) return;
+        
+        // --- MUSIC START LOGIC ---
+        // This forces the browser to acknowledge the "Click" and start the audio
+        bgm.volume = 0.5;
+        bgm.play().catch(e => {
+            console.log("Audio blocked. Rename your file to 'music.mp3'");
+        });
+
+        overlay.style.display = "none";
+        state.isLive = true; 
+        state.dist = 0; 
+        state.speed = 11; 
+        state.inDragon = false;
+        state.newBestReached = false;
+        obstacles = []; 
+        lastChunkX = 1000; 
+        player.y = GROUND_Y - 50; player.dy = 0; player.rot = 0; player.trail = [];
+        player.coyoteTime = 0;
+        scoreEl.classList.remove("new-best");
+    }
+
+    function gameOver() {
+        state.isLive = false;
+        
+        // Pause and Reset Music
+        bgm.pause();
+        bgm.currentTime = 0;
+
+        const finalScore = Math.floor(state.dist/100);
+        if (finalScore > highScore) {
+            highScore = finalScore;
+            localStorage.setItem("neonDashBest", highScore);
+            bestEl.innerText = highScore;
+        }
+        overlay.style.display = "flex";
+        document.getElementById("statusTitle").innerText = state.newBestReached ? "NEW RECORD!" : "CRASHED!";
+        document.getElementById("endStats").innerHTML = `SCORE: ${finalScore}<br>BEST: ${highScore}`;
+        document.getElementById("startBtn").innerText = "TRY AGAIN";
+    }
+
+    function gameLoop(timestamp) {
+        pollGamepad();
+        ctx.fillStyle = "#020005"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        stars.forEach(s => {
+            if (state.isLive) s.x -= s.s * (state.speed * 0.2);
+            if (s.x < 0) s.x = canvas.width;
+            ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.fillRect(s.x, s.y, 2, 2);
+        });
+
+        if (state.isLive) {
+            state.dist += state.speed; 
+            state.pulse = Math.sin(state.dist / 100) * 10; 
+            state.hue = (state.hue + 0.4) % 360;
+            
+            state.speed = 11 + (Math.floor(state.dist / 50000) * 0.6);
+            const curScore = Math.floor(state.dist/100);
+            scoreEl.innerText = curScore;
+
+            if (curScore > highScore && !state.newBestReached && highScore > 0) {
+                state.newBestReached = true;
+                scoreEl.classList.add("new-best");
+            }
+            
+            let floorY = GROUND_Y - 45;
+            let currentOnRamp = false;
+
+            obstacles.forEach(o => {
+                let sx = o.x - state.dist + player.x; 
+                
+                if (o.t === 'ramp' && player.x + 30 > sx && player.x < sx + o.w) {
+                    let progress = (player.x + 40) - sx;
+                    if (progress > 0 && progress < o.w + 60) {
+                        let rampHeight = Math.min(progress * (o.h / o.w), o.h);
+                        let targetY = o.y - rampHeight - 45;
+                        if (Math.abs(player.y - targetY) < 40) { 
+                            floorY = targetY;
+                            currentOnRamp = true;
+                        }
+                    }
+                }
+            });
+
+            if (currentOnRamp || player.grounded) {
+                player.coyoteTime = timestamp;
+            }
+            player.onRamp = currentOnRamp;
+
+            if (state.inDragon) {
+                if (input.active) player.dy -= 1.4;
+                player.dy += 0.85; player.dy *= 0.94; 
+                player.rot = player.dy * 0.04; 
+            } else { 
+                const canCoyoteJump = (timestamp - player.coyoteTime) < 150;
+                if (input.jumpPressed && (player.grounded || player.onRamp || canCoyoteJump)) {
+                    player.dy = -19; 
+                    player.grounded = false;
+                    player.onRamp = false;
+                    player.coyoteTime = 0;
+                }
+                input.jumpPressed = false; 
+                player.dy += 1.35; 
+                if (!player.grounded && !player.onRamp) player.rot += 0.22;
+            }
+            
+            player.y += player.dy;
+
+            if (!state.inDragon) {
+                if (player.y > floorY) {
+                    player.y = floorY; player.dy = 0; 
+                    if(!player.grounded) {
+                        player.grounded = true;
+                        player.rot = Math.round(player.rot / (Math.PI/2)) * (Math.PI/2);
+                    }
+                } else { player.grounded = false; }
+            } else {
+                if (player.y > GROUND_Y - 45) {
+                    player.y = GROUND_Y - 45; player.dy = 0; player.rot = 0; 
+                }
+                if (player.y < -100) gameOver();
+            }
+            
+            if (lastChunkX - state.dist < canvas.width) spawnChunk();
+        }
+
+        player.trail.push({y: player.y, r: player.rot});
+        if(player.trail.length > 10) player.trail.shift();
+        player.trail.forEach((t, i) => {
+            ctx.globalAlpha = i/20; ctx.save(); ctx.translate(player.x+22.5, t.y+22.5); ctx.rotate(t.r);
+            ctx.strokeStyle = `hsl(${state.hue}, 100%, 70%)`; ctx.strokeRect(-22.5, -22.5, 45, 45); ctx.restore();
+        });
+
+        ctx.globalAlpha = 1; ctx.save(); ctx.translate(player.x+22.5, player.y+22.5); ctx.rotate(player.rot);
+        ctx.fillStyle = "#fff"; ctx.shadowBlur = 15 + state.pulse; ctx.shadowColor = `hsl(${state.hue}, 100%, 50%)`;
+        ctx.fillRect(-22.5, -22.5, 45, 45);
+        ctx.strokeStyle = "#000"; ctx.lineWidth = 4; ctx.strokeRect(-22.5, -22.5, 45, 45);
+        ctx.restore();
+
+        obstacles.forEach((o, i) => {
+            let sx = o.x - state.dist + player.x;
+            ctx.shadowBlur = 15;
+            if (o.t === 'ramp') {
+                ctx.fillStyle = "#0ff"; ctx.shadowColor = "#0ff";
+                ctx.beginPath(); ctx.moveTo(sx, o.y); ctx.lineTo(sx+o.w, o.y); ctx.lineTo(sx+o.w, o.y-o.h); ctx.fill();
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+            } else if (o.t === 's') { 
+                ctx.fillStyle = "#f06"; ctx.shadowColor = "#f06";
+                ctx.beginPath(); ctx.moveTo(sx, o.y+45); ctx.lineTo(sx+22.5, o.y); ctx.lineTo(sx+45, o.y+45); ctx.fill();
+            } else if (o.t === 'saw') {
+                ctx.fillStyle = "#f06"; ctx.shadowColor = "#f06";
+                ctx.save(); ctx.translate(sx+22.5, o.y+22.5); ctx.rotate(state.dist/40); ctx.fillRect(-22.5, -22.5, 45, 45); ctx.restore();
+            } else if (o.t === 'dragon' || o.t === 'p') {
+                ctx.fillStyle = o.t === 'dragon' ? "#0f0" : "#ff0"; ctx.shadowColor = ctx.fillStyle;
+                ctx.fillRect(sx, o.y, 40, 80);
+            }
+
+            let hitX = sx + 10; let hitW = o.w - 20;
+            if (state.isLive && o.t !== 'ramp' && player.x < hitX + hitW && player.x + 30 > hitX && player.y < o.y + 40 && player.y + 40 > o.y) {
+                if (o.t === 'dragon' && o.active) { state.inDragon = true; o.active = false; }
+                else if (o.t === 'p' && o.active) { state.inDragon = false; o.active = false; player.rot = 0; }
+                else if (o.t !== 'dragon' && o.t !== 'p') { gameOver(); }
+            }
+            if (sx < -200) obstacles.splice(i, 1);
+        });
+
+        ctx.shadowBlur = 10; ctx.strokeStyle = `hsl(${state.hue}, 100%, 50%)`;
+        ctx.beginPath(); ctx.moveTo(0, GROUND_Y); ctx.lineTo(canvas.width, GROUND_Y); ctx.stroke();
+        requestAnimationFrame(gameLoop);
+    }
+    requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
